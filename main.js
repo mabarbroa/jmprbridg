@@ -1,3 +1,6 @@
+// main.js — SIHITAM bridge bot (Jumper/LI.FI)
+// Dep: npm i @lifi/sdk@latest viem
+
 import fs from 'fs';
 import { setTimeout as wait } from 'timers/promises';
 import readline from 'readline/promises';
@@ -6,6 +9,20 @@ import { EVM, createConfig as createLifiConfig, getQuote, convertQuoteToRoute, e
 import { createWalletClient, http, parseEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
+// ========== BANNER ==========
+function showBanner() {
+  console.log('\x1b[1;37m'); // putih tebal
+  console.log('███████ ██ ██   ██ ██ ████████  █████  ███    ███');
+  console.log('██      ██ ██   ██ ██    ██    ██   ██ ████  ████');
+  console.log('███████ ██ ███████ ██    ██    ███████ ██ ████ ██');
+  console.log('     ██ ██ ██   ██ ██    ██    ██   ██ ██  ██  ██');
+  console.log('███████ ██ ██   ██ ██    ██    ██   ██ ██      ██');
+  console.log('\x1b[0m'); // reset
+  console.log('\x1b[30;47m%s\x1b[0m', '                   S I H I T A M                   ');
+  console.log('\n');
+}
+
+// ========== CHAINS ==========
 const CHAINS = {
   BASE:      { id: 8453,  key: '1', name: 'Base',           rpc: 'https://mainnet.base.org' },
   OP:        { id: 10,    key: '2', name: 'OP Mainnet',     rpc: 'https://mainnet.optimism.io' },
@@ -13,18 +30,23 @@ const CHAINS = {
   INK:       { id: 57073, key: '4', name: 'Ink',            rpc: 'https://rpc-gel.inkonchain.com' },
 };
 const BY_KEY = Object.fromEntries(Object.values(CHAINS).map(c => [c.key, c]));
-const BY_ID  = Object.fromEntries(Object.values(CHAINS).map(c => [c.id, c]));
+const BY_ID  = Object.fromEntries(Object.values(CHAINS).map(c => [c.id,  c]));
 const ADDRESS_ZERO = '0x0000000000000000000000000000000000000000';
 
+// ========== HELPERS ==========
 function loadPrivateKeys(file = 'account.txt') {
   if (!fs.existsSync(file)) throw new Error(`File ${file} tidak ditemukan.`);
-  const lines = fs.readFileSync(file, 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  const lines = fs.readFileSync(file, 'utf8')
+    .split('\n').map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'));
   if (!lines.length) throw new Error('account.txt kosong.');
   return lines.map(k => (k.startsWith('0x') ? k : `0x${k}`));
 }
+
 function randomDelayMs(minSec = 5, maxSec = 20) {
   return (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
 }
+
 function makeClient(pk, chain) {
   const account = privateKeyToAccount(pk);
   return createWalletClient({
@@ -38,29 +60,32 @@ function makeClient(pk, chain) {
     transport: http(chain.rpc),
   });
 }
+
 function logHeader(title) {
   console.log('\n' + '-'.repeat(70));
   console.log(title);
   console.log('-'.repeat(70));
 }
 
+// ========== LI.FI glue ==========
 function setLifiProvider(client) {
   const evmProvider = EVM({
     getWalletClient: async () => client,
     switchChain: async (chainId) => {
       const chain = BY_ID[chainId];
       if (!chain) throw new Error(`RPC untuk chain ${chainId} belum diset.`);
-      return makeClient(client.account.source, chain);
+      return makeClient(client.account.source, chain); // pakai pk yang disimpan di .source
     },
   });
 
   createLifiConfig({
-    integrator: 'meongd-auto-bridge-bot',
+    integrator: 'sihitam-auto-bridge-bot',
     providers: [evmProvider],
-    preloadChains: true, // penting
+    preloadChains: true, // penting agar LI.FI kenal chain IDs
   });
 }
 
+// ========== PROMPTS ==========
 async function promptRunConfig() {
   const rl = new readline.Interface({ input, output });
 
@@ -80,6 +105,10 @@ async function promptRunConfig() {
   let targets = destKeys.map(k => BY_KEY[k]?.id).filter(Boolean);
   targets = targets.filter(id => id !== srcChain.id);
   if (!targets.length) { rl.close(); throw new Error('Tidak ada chain tujuan yang valid.'); }
+
+  const cyclesStr = (await rl.question('\nBerapa kali bridge ingin dijalankan? [default 1]: ')).trim();
+  const cycles = cyclesStr ? Number(cyclesStr) : 1;
+  if (!Number.isInteger(cycles) || cycles <= 0) { rl.close(); throw new Error('Jumlah cycle tidak valid.'); }
 
   const amountStr = (await rl.question('\nAmount (ETH) yang ingin di-bridge [default 0.01]: ')).trim();
   const amountEth = amountStr ? Number(amountStr) : 0.01;
@@ -102,9 +131,10 @@ async function promptRunConfig() {
   }
 
   rl.close();
-  return { srcChain, targets, amountEth, slippage, reserveSrcEth, destGasEth };
+  return { srcChain, targets, cycles, amountEth, slippage, reserveSrcEth, destGasEth };
 }
 
+// ========== CORE BRIDGE ==========
 async function bridgeOnce({ client, fromChain, toChainId, amountEth, slippage, destGasEth }) {
   const fromAddress = client.account.address;
   const fromAmountWei = parseEther(String(amountEth));
@@ -129,9 +159,11 @@ async function bridgeOnce({ client, fromChain, toChainId, amountEth, slippage, d
   await executeRoute(route, {
     updateRouteHook(updated) {
       updated.steps.forEach((step, i) => {
-        const p = step.execution?.process?.at(-1);
-        if (p?.txHash) console.log(`Step ${i + 1} → tx: ${p.txHash}`);
-        if (p?.status) console.log(`Step ${i + 1} status: ${p.status}`);
+        const proc = step.execution?.process?.at(-1);
+        const label = `[Step ${i + 1}] ${step.type} | ${step.action.fromChainId}→${step.action.toChainId}`;
+        if (proc?.message) console.log(`${label} :: ${proc.message}`);
+        if (proc?.status)  console.log(`${label} :: status=${proc.status}`);
+        if (proc?.txHash)  console.log(`${label} :: tx=${proc.txHash}`);
       });
     },
     acceptExchangeRateUpdateHook: async () => true,
@@ -140,28 +172,33 @@ async function bridgeOnce({ client, fromChain, toChainId, amountEth, slippage, d
   console.log(`✅ Selesai: ${amountEth} ETH ${fromChain.name} → ${BY_ID[toChainId].name}`);
 }
 
+// ========== MAIN ==========
 async function main() {
-  const { srcChain, targets, amountEth, slippage, reserveSrcEth, destGasEth } = await promptRunConfig();
+  showBanner();
 
+  const { srcChain, targets, cycles, amountEth, slippage, reserveSrcEth, destGasEth } = await promptRunConfig();
   const privateKeys = loadPrivateKeys('account.txt');
 
   for (const [i, pk] of privateKeys.entries()) {
     logHeader(`Wallet ${i + 1}`);
     const srcClient = makeClient(pk, srcChain);
-    srcClient.account.source = pk;
+    srcClient.account.source = pk; // simpan pk untuk switchChain glue
     setLifiProvider(srcClient);
 
-    // (opsional) tambahkan cek saldo dan auto-adjust amount di sini.
+    // (Opsional) TODO: cek saldo & auto-adjust amount agar sisa >= reserveSrcEth
 
-    for (const toChainId of targets) {
-      try {
-        await bridgeOnce({ client: srcClient, fromChain: srcChain, toChainId, amountEth, slippage, destGasEth });
-      } catch (err) {
-        console.error(`❌ Gagal bridge ke ${BY_ID[toChainId].name}:`, err?.message || err);
+    for (let cycle = 1; cycle <= cycles; cycle++) {
+      console.log(`\n=== Cycle ${cycle}/${cycles} ===`);
+      for (const toChainId of targets) {
+        try {
+          await bridgeOnce({ client: srcClient, fromChain: srcChain, toChainId, amountEth, slippage, destGasEth });
+        } catch (err) {
+          console.error(`❌ Gagal bridge ke ${BY_ID[toChainId].name}:`, err?.message || err);
+        }
+        const d = randomDelayMs(5, 20);
+        console.log(`⏳ Delay ${(d / 1000).toFixed(0)} detik...\n`);
+        await wait(d);
       }
-      const d = randomDelayMs(5, 20);
-      console.log(`⏳ Delay ${(d / 1000).toFixed(0)} detik...\n`);
-      await wait(d);
     }
   }
 
