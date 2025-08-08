@@ -1,5 +1,3 @@
-// main.js
-import 'dotenv/config';
 import fs from 'fs';
 import { setTimeout as wait } from 'timers/promises';
 import readline from 'readline/promises';
@@ -8,29 +6,25 @@ import { EVM, createConfig as createLifiConfig, getQuote, convertQuoteToRoute, e
 import { createWalletClient, http, parseEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-// ====== CHAINS ======
 const CHAINS = {
-  BASE:      { id: 8453,  key: '1', name: 'Base',           rpc: process.env.BASE_RPC      || 'https://mainnet.base.org' },
-  OP:        { id: 10,    key: '2', name: 'OP Mainnet',     rpc: process.env.OP_RPC        || 'https://mainnet.optimism.io' },
-  ARBITRUM:  { id: 42161, key: '3', name: 'Arbitrum One',   rpc: process.env.ARBITRUM_RPC  || 'https://arb1.arbitrum.io/rpc' },
-  INK:       { id: 57073, key: '4', name: 'Ink',            rpc: process.env.INK_RPC       || 'https://rpc-gel.inkonchain.com' },
+  BASE:      { id: 8453,  key: '1', name: 'Base',           rpc: 'https://mainnet.base.org' },
+  OP:        { id: 10,    key: '2', name: 'OP Mainnet',     rpc: 'https://mainnet.optimism.io' },
+  ARBITRUM:  { id: 42161, key: '3', name: 'Arbitrum One',   rpc: 'https://arb1.arbitrum.io/rpc' },
+  INK:       { id: 57073, key: '4', name: 'Ink',            rpc: 'https://rpc-gel.inkonchain.com' },
 };
 const BY_KEY = Object.fromEntries(Object.values(CHAINS).map(c => [c.key, c]));
 const BY_ID  = Object.fromEntries(Object.values(CHAINS).map(c => [c.id, c]));
 const ADDRESS_ZERO = '0x0000000000000000000000000000000000000000';
 
-// ====== HELPERS ======
 function loadPrivateKeys(file = 'account.txt') {
   if (!fs.existsSync(file)) throw new Error(`File ${file} tidak ditemukan.`);
   const lines = fs.readFileSync(file, 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   if (!lines.length) throw new Error('account.txt kosong.');
   return lines.map(k => (k.startsWith('0x') ? k : `0x${k}`));
 }
-
 function randomDelayMs(minSec = 5, maxSec = 20) {
   return (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
 }
-
 function makeClient(pk, chain) {
   const account = privateKeyToAccount(pk);
   return createWalletClient({
@@ -44,21 +38,18 @@ function makeClient(pk, chain) {
     transport: http(chain.rpc),
   });
 }
-
 function logHeader(title) {
   console.log('\n' + '-'.repeat(70));
   console.log(title);
   console.log('-'.repeat(70));
 }
 
-// ====== LI.FI Provider glue ======
 function setLifiProvider(client) {
   const evmProvider = EVM({
     getWalletClient: async () => client,
     switchChain: async (chainId) => {
       const chain = BY_ID[chainId];
       if (!chain) throw new Error(`RPC untuk chain ${chainId} belum diset.`);
-      // viem tidak menyimpan pk mentah, kita simpan manual di .source
       return makeClient(client.account.source, chain);
     },
   });
@@ -66,11 +57,10 @@ function setLifiProvider(client) {
   createLifiConfig({
     integrator: 'meongd-auto-bridge-bot',
     providers: [evmProvider],
-    preloadChains: false,
+    preloadChains: true, // penting
   });
 }
 
-// ====== PROMPTS ======
 async function promptRunConfig() {
   const rl = new readline.Interface({ input, output });
 
@@ -88,7 +78,7 @@ async function promptRunConfig() {
   const destSel = (await rl.question('Masukkan (contoh: 4 untuk ke Ink, atau 3,4): ')).trim();
   const destKeys = destSel ? destSel.split(',').map(s => s.trim()) : [];
   let targets = destKeys.map(k => BY_KEY[k]?.id).filter(Boolean);
-  targets = targets.filter(id => id !== srcChain.id); // jangan sama dengan sumber
+  targets = targets.filter(id => id !== srcChain.id);
   if (!targets.length) { rl.close(); throw new Error('Tidak ada chain tujuan yang valid.'); }
 
   const amountStr = (await rl.question('\nAmount (ETH) yang ingin di-bridge [default 0.01]: ')).trim();
@@ -115,7 +105,6 @@ async function promptRunConfig() {
   return { srcChain, targets, amountEth, slippage, reserveSrcEth, destGasEth };
 }
 
-// ====== CORE BRIDGE ======
 async function bridgeOnce({ client, fromChain, toChainId, amountEth, slippage, destGasEth }) {
   const fromAddress = client.account.address;
   const fromAmountWei = parseEther(String(amountEth));
@@ -158,28 +147,18 @@ async function main() {
 
   for (const [i, pk] of privateKeys.entries()) {
     logHeader(`Wallet ${i + 1}`);
-    // Start di chain sumber yang dipilih
     const srcClient = makeClient(pk, srcChain);
-    // simpan pk untuk switchChain glue
     srcClient.account.source = pk;
     setLifiProvider(srcClient);
 
-    // (Opsional) Di sini kamu bisa tambahkan cek saldo src & pastikan amountEth + reserve tidak melebihi saldo.
+    // (opsional) tambahkan cek saldo dan auto-adjust amount di sini.
 
     for (const toChainId of targets) {
       try {
-        await bridgeOnce({
-          client: srcClient,
-          fromChain: srcChain,
-          toChainId,
-          amountEth,
-          slippage,
-          destGasEth,
-        });
+        await bridgeOnce({ client: srcClient, fromChain: srcChain, toChainId, amountEth, slippage, destGasEth });
       } catch (err) {
         console.error(`❌ Gagal bridge ke ${BY_ID[toChainId].name}:`, err?.message || err);
       }
-
       const d = randomDelayMs(5, 20);
       console.log(`⏳ Delay ${(d / 1000).toFixed(0)} detik...\n`);
       await wait(d);
