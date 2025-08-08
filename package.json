@@ -1,0 +1,13 @@
+{
+  "name": "jumper-auto-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "@lifi/sdk": "^4.7.0",
+    "dotenv": "^16.4.5",
+    "viem": "^2.17.5"
+  }
+}
